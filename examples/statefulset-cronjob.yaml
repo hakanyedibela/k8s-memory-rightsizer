@@ -1,0 +1,42 @@
+---
+# StatefulSet variant: same script, just WORKLOAD_KIND=statefulset.
+# StatefulSet pod names are <name>-<ordinal>, so the default POD_REGEX still matches.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: rightsize-leaky-sts
+  namespace: default
+spec:
+  schedule: "0 */6 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: rightsizer
+          restartPolicy: OnFailure
+          containers:
+          - name: rightsizer
+            image: alpine/k8s:1.29.4
+            command: ["/bin/sh", "/scripts/rightsize.sh"]
+            env:
+            - { name: NAMESPACE,            value: "default" }
+            - { name: WORKLOAD_KIND,        value: "statefulset" }
+            - { name: WORKLOAD_NAME,        value: "leaky-sts" }
+            - { name: CONTAINER,            value: "app" }
+            - { name: PROM_URL,             value: "http://prometheus.monitoring.svc:9090" }
+            - { name: WINDOW,               value: "24h" }
+            - { name: HEADROOM_PCT,         value: "30" }
+            - { name: MIN_MI,               value: "512" }
+            - { name: MAX_MI,               value: "8192" }
+            - { name: CHANGE_THRESHOLD_PCT, value: "15" }
+            - { name: DRY_RUN,              value: "true" }
+            volumeMounts:
+            - { name: script, mountPath: /scripts }
+          volumes:
+          - name: script
+            configMap:
+              name: rightsizer-script
+              defaultMode: 0755

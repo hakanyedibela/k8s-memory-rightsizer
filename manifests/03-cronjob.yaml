@@ -1,0 +1,46 @@
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: rightsize-leaky-app
+  namespace: default
+spec:
+  schedule: "0 */6 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: rightsizer
+          restartPolicy: OnFailure
+          containers:
+          - name: rightsizer
+            image: alpine/k8s:1.29.4   # ships kubectl + curl + jq
+            command: ["/bin/sh", "/scripts/rightsize.sh"]
+            env:
+            - { name: NAMESPACE,            value: "default" }
+            - { name: WORKLOAD_KIND,        value: "deployment" }   # deployment | statefulset
+            - { name: WORKLOAD_NAME,        value: "leaky-app" }
+            - { name: CONTAINER,            value: "app" }
+            - { name: PROM_URL,             value: "http://prometheus.monitoring.svc:9090" }
+            - { name: WINDOW,               value: "24h" }
+            - { name: HEADROOM_PCT,         value: "30" }
+            - { name: MIN_MI,               value: "256" }
+            - { name: MAX_MI,               value: "4096" }
+            - { name: CHANGE_THRESHOLD_PCT, value: "10" }
+            - { name: DRY_RUN,              value: "true" }   # start in dry-run!
+            # Optional: tighten pod regex if WORKLOAD_NAME prefixes other pods
+            # - { name: POD_REGEX, value: "leaky-app-[a-z0-9]+-[a-z0-9]+" }
+            # Optional: bearer token for protected Prometheus
+            # - name: PROM_TOKEN
+            #   valueFrom:
+            #     secretKeyRef: { name: rightsizer-prom, key: token }
+            volumeMounts:
+            - { name: script, mountPath: /scripts }
+          volumes:
+          - name: script
+            configMap:
+              name: rightsizer-script
+              defaultMode: 0755

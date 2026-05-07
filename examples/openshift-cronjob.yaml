@@ -1,0 +1,47 @@
+---
+# OpenShift variant: queries the platform Prometheus via thanos-querier using
+# the pod's mounted ServiceAccount token. Requires the SA to be granted
+# `cluster-monitoring-view` (see README).
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: rightsize-leaky-app
+  namespace: default
+spec:
+  schedule: "0 */6 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: rightsizer
+          restartPolicy: OnFailure
+          containers:
+          - name: rightsizer
+            image: alpine/k8s:1.29.4
+            command: ["/bin/sh", "-c"]
+            args:
+            - |
+              export PROM_TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
+              exec /bin/sh /scripts/rightsize.sh
+            env:
+            - { name: NAMESPACE,            value: "default" }
+            - { name: WORKLOAD_KIND,        value: "deployment" }
+            - { name: WORKLOAD_NAME,        value: "leaky-app" }
+            - { name: CONTAINER,            value: "app" }
+            - { name: PROM_URL,             value: "https://thanos-querier.openshift-monitoring.svc:9091" }
+            - { name: WINDOW,               value: "24h" }
+            - { name: HEADROOM_PCT,         value: "30" }
+            - { name: MIN_MI,               value: "256" }
+            - { name: MAX_MI,               value: "4096" }
+            - { name: CHANGE_THRESHOLD_PCT, value: "10" }
+            - { name: DRY_RUN,              value: "true" }
+            volumeMounts:
+            - { name: script, mountPath: /scripts }
+          volumes:
+          - name: script
+            configMap:
+              name: rightsizer-script
+              defaultMode: 0755

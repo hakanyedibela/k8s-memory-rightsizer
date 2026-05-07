@@ -1,0 +1,76 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rightsizer-script
+  namespace: default
+data:
+  rightsize.sh: |
+    #!/bin/sh
+    set -eu
+
+    : "${NAMESPACE:?required}"
+    : "${WORKLOAD_KIND:?required}"        # deployment | statefulset
+    : "${WORKLOAD_NAME:?required}"
+    : "${CONTAINER:?required}"
+    : "${PROM_URL:?required}"
+
+    WINDOW="${WINDOW:-24h}"
+    HEADROOM_PCT="${HEADROOM_PCT:-30}"
+    MIN_MI="${MIN_MI:-256}"
+    MAX_MI="${MAX_MI:-4096}"
+    CHANGE_THRESHOLD_PCT="${CHANGE_THRESHOLD_PCT:-10}"
+    DRY_RUN="${DRY_RUN:-false}"
+    POD_REGEX="${POD_REGEX:-${WORKLOAD_NAME}-.*}"
+    PROM_TOKEN="${PROM_TOKEN:-}"
+
+    QUERY="max(max_over_time(container_memory_working_set_bytes{namespace=\"${NAMESPACE}\",pod=~\"${POD_REGEX}\",container=\"${CONTAINER}\"}[${WINDOW}]))"
+    echo "[rightsizer] query: $QUERY"
+
+    AUTH=""
+    [ -n "$PROM_TOKEN" ] && AUTH="-H Authorization: Bearer ${PROM_TOKEN}"
+
+    RESP=$(curl -sSfk $AUTH -G \
+      --data-urlencode "query=${QUERY}" \
+      "${PROM_URL}/api/v1/query")
+
+    PEAK_BYTES=$(echo "$RESP" | jq -r '.data.result[0].value[1] // empty')
+    if [ -z "$PEAK_BYTES" ]; then
+      echo "[rightsizer] no data returned — skipping"
+      exit 0
+    fi
+
+    PEAK_MI=$(echo "$PEAK_BYTES" | awk '{printf "%d", $1 / 1024 / 1024}')
+    NEW_MI=$(( PEAK_MI * (100 + HEADROOM_PCT) / 100 ))
+    [ "$NEW_MI" -lt "$MIN_MI" ] && NEW_MI=$MIN_MI
+    [ "$NEW_MI" -gt "$MAX_MI" ] && NEW_MI=$MAX_MI
+
+    CURRENT=$(kubectl get "${WORKLOAD_KIND}/${WORKLOAD_NAME}" -n "$NAMESPACE" \
+      -o jsonpath="{.spec.template.spec.containers[?(@.name=='${CONTAINER}')].resources.requests.memory}" \
+      | sed 's/Mi$//')
+
+    if [ -n "$CURRENT" ] && [ "$CURRENT" -gt 0 ] 2>/dev/null; then
+      if [ "$NEW_MI" -gt "$CURRENT" ]; then
+        DIFF=$(( NEW_MI - CURRENT ))
+      else
+        DIFF=$(( CURRENT - NEW_MI ))
+      fi
+      DIFF_PCT=$(( DIFF * 100 / CURRENT ))
+      if [ "$DIFF_PCT" -lt "$CHANGE_THRESHOLD_PCT" ]; then
+        echo "[rightsizer] current=${CURRENT}Mi new=${NEW_MI}Mi diff=${DIFF_PCT}% < ${CHANGE_THRESHOLD_PCT}% — skip"
+        exit 0
+      fi
+    fi
+
+    echo "[rightsizer] peak=${PEAK_MI}Mi current=${CURRENT:-unset}Mi -> new=${NEW_MI}Mi"
+
+    if [ "$DRY_RUN" = "true" ]; then
+      echo "[rightsizer] DRY_RUN — not patching"
+      exit 0
+    fi
+
+    kubectl set resources "${WORKLOAD_KIND}/${WORKLOAD_NAME}" -n "$NAMESPACE" \
+      --containers="${CONTAINER}" \
+      --requests="memory=${NEW_MI}Mi" \
+      --limits="memory=${NEW_MI}Mi"
+    echo "[rightsizer] patched ${WORKLOAD_KIND}/${WORKLOAD_NAME}"
